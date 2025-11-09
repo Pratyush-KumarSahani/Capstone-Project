@@ -1,18 +1,21 @@
 #include <iostream>
-#include <winsock2.h>
-#include <windows.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <dirent.h>
 #include <fstream>
 #include <string>
 #include <sstream>
 #include <unordered_map>
+#include <cstring>
 
 using namespace std;
 
-#pragma comment(lib, "ws2_32.lib")
-
 #define PORT 8080
+#define BUFFER_SIZE 1024
 
-// 📘 Load credentials from users.txt
+//  Load credentials from users.txt
 unordered_map<string, string> loadUsers() {
     unordered_map<string, string> users;
     ifstream file("users.txt");
@@ -23,9 +26,9 @@ unordered_map<string, string> loadUsers() {
     return users;
 }
 
-// 🔐 Authenticate client
-bool authenticateClient(SOCKET clientSocket, const unordered_map<string, string> &users) {
-    char buffer[256];
+//  Authenticate client
+bool authenticateClient(int clientSocket, const unordered_map<string, string> &users) {
+    char buffer[BUFFER_SIZE];
 
     // Receive username
     int bytes = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
@@ -52,29 +55,29 @@ bool authenticateClient(SOCKET clientSocket, const unordered_map<string, string>
     }
 }
 
-// 📁 List all files in the "server_files" folder
-void listFiles(SOCKET clientSocket) {
-    WIN32_FIND_DATAA findFileData;
-    HANDLE hFind = FindFirstFileA("server_files\\*", &findFileData);
+//  List all files in the "server_files" folder
+void listFiles(int clientSocket) {
+    DIR *dir = opendir("server_files");
     string fileList = "";
 
-    if (hFind == INVALID_HANDLE_VALUE) {
+    if (!dir) {
         fileList = "Error: Folder not found.\n";
     } else {
-        do {
-            string name = findFileData.cFileName;
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            string name = entry->d_name;
             if (name != "." && name != "..")
                 fileList += name + "\n";
-        } while (FindNextFileA(hFind, &findFileData));
-        FindClose(hFind);
+        }
+        closedir(dir);
     }
 
     send(clientSocket, fileList.c_str(), fileList.size(), 0);
 }
 
-// 📤 Send file to client
-void sendFile(SOCKET clientSocket, const string &fileName) {
-    string filePath = "server_files\\" + fileName;
+//  Send file to client
+void sendFile(int clientSocket, const string &fileName) {
+    string filePath = "server_files/" + fileName;
     ifstream file(filePath, ios::binary);
     if (!file.is_open()) {
         string msg = "Error: File not found.";
@@ -87,7 +90,7 @@ void sendFile(SOCKET clientSocket, const string &fileName) {
     file.seekg(0, ios::beg);
     send(clientSocket, reinterpret_cast<char*>(&fileSize), sizeof(fileSize), 0);
 
-    char buffer[1024];
+    char buffer[BUFFER_SIZE];
     while (!file.eof()) {
         file.read(buffer, sizeof(buffer));
         int bytesRead = file.gcount();
@@ -95,12 +98,12 @@ void sendFile(SOCKET clientSocket, const string &fileName) {
     }
 
     file.close();
-    cout << "📤 Sent file: " << fileName << endl;
+    cout << " Sent file: " << fileName << endl;
 }
 
-// 📥 Receive file from client
-void receiveFile(SOCKET clientSocket, const string &fileName) {
-    string filePath = "server_files\\" + fileName;
+//  Receive file from client
+void receiveFile(int clientSocket, const string &fileName) {
+    string filePath = "server_files/" + fileName;
     ofstream file(filePath, ios::binary);
     if (!file.is_open()) {
         string msg = "Error: Cannot create file.";
@@ -111,7 +114,7 @@ void receiveFile(SOCKET clientSocket, const string &fileName) {
     size_t fileSize;
     recv(clientSocket, reinterpret_cast<char*>(&fileSize), sizeof(fileSize), 0);
 
-    char buffer[1024];
+    char buffer[BUFFER_SIZE];
     size_t totalReceived = 0;
 
     while (totalReceived < fileSize) {
@@ -122,42 +125,58 @@ void receiveFile(SOCKET clientSocket, const string &fileName) {
     }
 
     file.close();
-    cout << "📥 Received file: " << fileName << endl;
+    cout << " Received file: " << fileName << endl;
 }
 
 int main() {
-    WSADATA wsaData;
-    WSAStartup(MAKEWORD(2, 2), &wsaData);
-
+    // Load users
     unordered_map<string, string> users = loadUsers();
 
-    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    // Create socket
+    int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverSocket < 0) {
+        cerr << "❌ Error creating socket.\n";
+        return 1;
+    }
+
     sockaddr_in serverAddr{};
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_port = htons(PORT);
     serverAddr.sin_addr.s_addr = INADDR_ANY;
 
-    bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr));
+    // Bind
+    if (bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+        cerr << "❌ Bind failed.\n";
+        close(serverSocket);
+        return 1;
+    }
+
+    // Listen
     listen(serverSocket, 5);
+    cout << "✅ Server running on port " << PORT << " and waiting for connection...\n";
 
-    cout << "✅ Server running on port " << PORT << " and waiting for connection..." << endl;
-
-    SOCKET clientSocket;
+    // Accept client
     sockaddr_in clientAddr{};
-    int clientAddrSize = sizeof(clientAddr);
-    clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientAddrSize);
-    cout << "✅ Client connected!" << endl;
+    socklen_t clientAddrSize = sizeof(clientAddr);
+    int clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientAddrSize);
+    if (clientSocket < 0) {
+        cerr << "❌ Failed to accept connection.\n";
+        close(serverSocket);
+        return 1;
+    }
+
+    cout << "✅ Client connected!\n";
 
     // Authenticate user before anything
     if (!authenticateClient(clientSocket, users)) {
-        closesocket(clientSocket);
-        closesocket(serverSocket);
-        WSACleanup();
+        close(clientSocket);
+        close(serverSocket);
         return 0;
     }
 
+    // Command handling loop
     while (true) {
-        char option[256];
+        char option[BUFFER_SIZE];
         int bytesReceived = recv(clientSocket, option, sizeof(option) - 1, 0);
         if (bytesReceived <= 0) break;
         option[bytesReceived] = '\0';
@@ -180,8 +199,7 @@ int main() {
         }
     }
 
-    closesocket(clientSocket);
-    closesocket(serverSocket);
-    WSACleanup();
+    close(clientSocket);
+    close(serverSocket);
     return 0;
 }
