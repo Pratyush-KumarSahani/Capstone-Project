@@ -1,36 +1,39 @@
 #include <iostream>
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <dirent.h>
 #include <fstream>
 #include <string>
+#include <cstring>
 
 using namespace std;
 
-#pragma comment(lib, "ws2_32.lib")
-
 #define PORT 8080
 #define SERVER_IP "127.0.0.1"
+#define BUFFER_SIZE 1024
 
+//  List files in client_files folder
 void listClientFiles() {
-    WIN32_FIND_DATAA findFileData;
-    HANDLE hFind = FindFirstFileA("client_files\\*", &findFileData);
-    cout << "\n📂 Files in client_files folder:\n";
-    if (hFind == INVALID_HANDLE_VALUE) {
+    DIR *dir = opendir("client_files");
+    cout << "\n Files in client_files folder:\n";
+    if (!dir) {
         cout << "Error: Folder not found.\n";
         return;
     }
-    do {
-        string name = findFileData.cFileName;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        string name = entry->d_name;
         if (name != "." && name != "..")
             cout << " - " << name << endl;
-    } while (FindNextFileA(hFind, &findFileData));
-    FindClose(hFind);
+    }
+    closedir(dir);
 }
 
-
-// Authentication before continuing
-bool authenticate(SOCKET sock) {
+//  Authentication before continuing
+bool authenticate(int sock) {
     string username, password;
     cout << "\n=== LOGIN REQUIRED ===\n";
     cout << "Username: ";
@@ -41,7 +44,7 @@ bool authenticate(SOCKET sock) {
     send(sock, username.c_str(), username.size(), 0);
     send(sock, password.c_str(), password.size(), 0);
 
-    char buffer[256];
+    char buffer[BUFFER_SIZE];
     int bytes = recv(sock, buffer, sizeof(buffer) - 1, 0);
     if (bytes <= 0) return false;
     buffer[bytes] = '\0';
@@ -57,24 +60,27 @@ bool authenticate(SOCKET sock) {
 }
 
 int main() {
-    WSADATA wsaData;
-    WSAStartup(MAKEWORD(2, 2), &wsaData);
+    // Create socket
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        cerr << "❌ Socket creation failed.\n";
+        return 1;
+    }
 
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in serverAddr{};
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_port = htons(PORT);
     serverAddr.sin_addr.s_addr = inet_addr(SERVER_IP);
 
     cout << "Connecting to server...\n";
-    if (connect(sock, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-        cout << "❌ Connection failed. Error: " << WSAGetLastError() << endl;
+    if (connect(sock, (sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+        cerr << "❌ Connection failed.\n";
+        close(sock);
         return 1;
     }
 
     if (!authenticate(sock)) {
-        closesocket(sock);
-        WSACleanup();
+        close(sock);
         return 0;
     }
 
@@ -95,22 +101,26 @@ int main() {
             string cmd = "LIST_SERVER";
             send(sock, cmd.c_str(), cmd.size(), 0);
 
-            char buffer[2048];
+            char buffer[4096];
             int bytes = recv(sock, buffer, sizeof(buffer) - 1, 0);
-            buffer[bytes] = '\0';
-            cout << "\nServer files:\n" << buffer << endl;
-        } 
-          else if (choice == 2) {
+            if (bytes > 0) {
+                buffer[bytes] = '\0';
+                cout << "\nServer files:\n" << buffer << endl;
+            } else {
+                cout << "❌ Failed to retrieve file list.\n";
+            }
+
+        } else if (choice == 2) {
             listClientFiles();
-        } 
-        else if (choice == 3) {
+
+        } else if (choice == 3) {
             string filename;
             cout << "Enter file to upload (from client_files): ";
             cin >> filename;
             string command = "UPLOAD:" + filename;
             send(sock, command.c_str(), command.size(), 0);
 
-            string filePath = "client_files\\" + filename;
+            string filePath = "client_files/" + filename;
             ifstream file(filePath, ios::binary);
             if (!file.is_open()) {
                 cout << "❌ File not found.\n";
@@ -122,7 +132,7 @@ int main() {
             file.seekg(0, ios::beg);
             send(sock, reinterpret_cast<char*>(&fileSize), sizeof(fileSize), 0);
 
-            char buffer[1024];
+            char buffer[BUFFER_SIZE];
             while (!file.eof()) {
                 file.read(buffer, sizeof(buffer));
                 int bytesRead = file.gcount();
@@ -130,6 +140,7 @@ int main() {
             }
             file.close();
             cout << "✅ File uploaded successfully!\n";
+
         } else if (choice == 4) {
             string filename;
             cout << "Enter file name to download: ";
@@ -138,10 +149,18 @@ int main() {
             send(sock, command.c_str(), command.size(), 0);
 
             size_t fileSize;
-            recv(sock, reinterpret_cast<char*>(&fileSize), sizeof(fileSize), 0);
+            if (recv(sock, reinterpret_cast<char*>(&fileSize), sizeof(fileSize), 0) <= 0) {
+                cout << "❌ Failed to get file size.\n";
+                continue;
+            }
 
-            ofstream file("client_files\\" + filename, ios::binary);
-            char buffer[1024];
+            ofstream file("client_files/" + filename, ios::binary);
+            if (!file.is_open()) {
+                cout << "❌ Cannot create file.\n";
+                continue;
+            }
+
+            char buffer[BUFFER_SIZE];
             size_t totalReceived = 0;
             while (totalReceived < fileSize) {
                 int bytesReceived = recv(sock, buffer, sizeof(buffer), 0);
@@ -151,16 +170,16 @@ int main() {
             }
             file.close();
             cout << "✅ Download complete!\n";
+
         } else if (choice == 5) {
             string cmd = "EXIT";
             send(sock, cmd.c_str(), cmd.size(), 0);
             break;
-        } else {
-            cout << "Invalid choice.\n";
+
+        } else {           cout << "Invalid choice.\n";
         }
     }
 
-    closesocket(sock);
-    WSACleanup();
+    close(sock);
     return 0;
 }
