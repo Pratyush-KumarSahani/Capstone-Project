@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "./MyToken.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+
+contract TokenSale is ReentrancyGuard {
+
+    MyToken public token;
+    address public owner;
+
+    uint public tokensSold;
+    uint public maxTokensForSale;
+    bool public saleActive = true;
+
+    event TokensPurchased(address buyer, uint eth, uint tokens);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Admin only");
+        _;
+    }
+
+    constructor(address tokenAddress, uint _maxTokensForSale) {
+        token = MyToken(tokenAddress);
+        owner = msg.sender;
+        maxTokensForSale = _maxTokensForSale;
+    }
+
+    function getPrice() public view returns (uint) {
+        if (tokensSold < 10000) return 0.001 ether;
+        else if (tokensSold < 20000) return 0.002 ether;
+        else return 0.003 ether;
+    }
+    function buyTokens() external payable nonReentrant {
+        require(saleActive, "Sale stopped");
+        uint price = getPrice();
+        uint amount = msg.value / price;
+        require(amount > 0, "ETH too low");
+        require(tokensSold + amount <= maxTokensForSale, "Sold out");
+
+        tokensSold += amount;
+        token.transferFrom(owner, msg.sender, amount * 1e18);
+
+        emit TokensPurchased(msg.sender, msg.value, amount);
+    }
+
+    function setSaleStatus(bool status) external onlyOwner {
+        saleActive = status;
+    }
+
+    function withdrawETH() external onlyOwner {
+        payable(owner).transfer(address(this).balance);
+    }
+}
