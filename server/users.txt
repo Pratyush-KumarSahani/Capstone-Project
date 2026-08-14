@@ -1,4 +1,0 @@
-admin password123
-sujal 050505
-guest guest
-Pratyush 123456
